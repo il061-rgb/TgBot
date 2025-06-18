@@ -11,6 +11,8 @@ DATABASE_NAME = 'university_bot.db'
 
 bot = telebot.TeleBot(BOT_TOKEN)
 
+# Хранилище состояний пользователей
+user_states = {}
 
 # Инициализация БД
 def init_db():
@@ -58,7 +60,6 @@ def init_db():
     conn.commit()
     conn.close()
 
-
 # Проверка регистрации пользователя
 def is_user_registered(telegram_id):
     conn = sqlite3.connect(DATABASE_NAME)
@@ -67,7 +68,6 @@ def is_user_registered(telegram_id):
     user = cursor.fetchone()
     conn.close()
     return user is not None
-
 
 # Регистрация пользователя
 def register_user(telegram_id, full_name, role, group_name=None):
@@ -79,7 +79,6 @@ def register_user(telegram_id, full_name, role, group_name=None):
     ''', (telegram_id, full_name, role, group_name))
     conn.commit()
     conn.close()
-
 
 # Получение расписания
 def get_schedule(group_name, day=None):
@@ -103,7 +102,6 @@ def get_schedule(group_name, day=None):
     conn.close()
     return schedule
 
-
 # Получение заданий
 def get_assignments(group_name, subject=None):
     conn = sqlite3.connect(DATABASE_NAME)
@@ -111,7 +109,7 @@ def get_assignments(group_name, subject=None):
 
     if subject:
         cursor.execute('''
-        SELECT * FROM assignments 
+        SELECT * FROM assignments
         WHERE group_name = ? AND subject = ?
         ORDER BY deadline
         ''', (group_name, subject))
@@ -126,7 +124,6 @@ def get_assignments(group_name, subject=None):
     conn.close()
     return assignments
 
-
 # Основные команды
 @bot.message_handler(commands=['start'])
 def start(message):
@@ -140,17 +137,16 @@ def start(message):
             "Выберите вашу роль:",
             reply_markup=create_role_keyboard()
         )
-
+    user_states[message.chat.id] = {'state': 'start'}
 
 def create_role_keyboard():
     markup = types.ReplyKeyboardMarkup(resize_keyboard=True, row_width=2)
     markup.add(
         types.KeyboardButton('👨‍🎓 Я студент'),
         types.KeyboardButton('👨‍🏫 Я преподаватель'),
-        types.KeyboardButton('👨‍💼 Я абитуирент')
+        types.KeyboardButton('👨‍💼 Я абитуриент')
     )
     return markup
-
 
 @bot.message_handler(
     func=lambda message: message.text in ['👨‍🎓 Я студент', '👨‍🏫 Я преподаватель', '👨‍💼 Я абитуриент'])
@@ -158,10 +154,11 @@ def process_role(message):
     role_map = {
         '👨‍🎓 Я студент': 'student',
         '👨‍🏫 Я преподаватель': 'teacher',
-        '👨‍💼 Я абитуирент': 'abituirent'
+        '👨‍💼 Я абитуриент': 'abituirent'
     }
 
     role = role_map[message.text]
+    user_states[message.chat.id] = {'state': 'role_selected', 'role': role}
 
     if role == 'student':
         msg = bot.send_message(
@@ -178,17 +175,26 @@ def process_role(message):
         )
         bot.register_next_step_handler(msg, lambda m: process_teacher_auth(m, role))
 
-
 def process_student_name(message, role):
     full_name = message.text
+    user_states[message.chat.id]['full_name'] = full_name
     msg = bot.send_message(
         message.chat.id,
-        "Введите название вашей группы:"
+        "Введите название вашей группы:",
+        reply_markup=create_back_keyboard()
     )
     bot.register_next_step_handler(msg, lambda m: process_student_group(m, role, full_name))
 
-
 def process_student_group(message, role, full_name):
+    if message.text == '⬅️ Назад':
+        msg = bot.send_message(
+            message.chat.id,
+            "Введите ваше ФИО:",
+            reply_markup=types.ReplyKeyboardRemove()
+        )
+        bot.register_next_step_handler(msg, lambda m: process_student_name(m, role))
+        return
+    
     group_name = message.text
     register_user(message.chat.id, full_name, role, group_name)
     bot.send_message(
@@ -201,19 +207,20 @@ def process_student_group(message, role, full_name):
     )
     show_main_menu(message.chat.id)
 
-
 def process_teacher_auth(message, role):
-    # В реальном приложении нужно использовать хэширование и хранить ключи в БД
+    if message.text == '⬅️ Назад':
+        start(message)
+        return
+    
     valid_keys = {
         'teacher': 'teacher123',
-        # 'abituirent': 'abituirent123'
     }
 
     if message.text.strip() == valid_keys[role]:
         msg = bot.send_message(
             message.chat.id,
             "Введите ваше ФИО:",
-            reply_markup=types.ReplyKeyboardRemove()
+            reply_markup=create_back_keyboard()
         )
         bot.register_next_step_handler(msg, lambda m: process_teacher_name(m, role))
     else:
@@ -223,8 +230,16 @@ def process_teacher_auth(message, role):
             reply_markup=create_role_keyboard()
         )
 
-
 def process_teacher_name(message, role):
+    if message.text == '⬅️ Назад':
+        msg = bot.send_message(
+            message.chat.id,
+            "Введите ваш секретный ключ доступа:",
+            reply_markup=types.ReplyKeyboardRemove()
+        )
+        bot.register_next_step_handler(msg, lambda m: process_teacher_auth(m, role))
+        return
+    
     full_name = message.text
     register_user(message.chat.id, full_name, role)
     bot.send_message(
@@ -236,6 +251,10 @@ def process_teacher_name(message, role):
     )
     show_main_menu(message.chat.id)
 
+def create_back_keyboard():
+    markup = types.ReplyKeyboardMarkup(resize_keyboard=True)
+    markup.add(types.KeyboardButton('⬅️ Назад'))
+    return markup
 
 # Главное меню
 def show_main_menu(chat_id):
@@ -261,7 +280,7 @@ def show_main_menu(chat_id):
             types.KeyboardButton('👥 Группы'),
             types.KeyboardButton('ℹ️ Помощь')
         )
-    else:  # admin
+    else:  # abituirent
         markup.add(
             types.KeyboardButton('📅 Управление расписанием'),
             types.KeyboardButton('📝 Управление заданиями'),
@@ -269,12 +288,33 @@ def show_main_menu(chat_id):
             types.KeyboardButton('⚙️ Настройки системы')
         )
 
+    user_states[chat_id] = {'state': 'main_menu'}
     bot.send_message(
         chat_id,
         "Главное меню:",
         reply_markup=markup
     )
 
+# Обработка кнопки Назад
+@bot.message_handler(func=lambda message: message.text == '⬅️ Назад')
+def handle_back(message):
+    chat_id = message.chat.id
+    if chat_id not in user_states:
+        start(message)
+        return
+    
+    state = user_states[chat_id].get('state')
+    
+    if state == 'schedule_view':
+        handle_schedule(message)
+    elif state == 'assignments_view':
+        handle_assignments(message)
+    elif state == 'teacher_schedule_options':
+        show_main_menu(chat_id)
+    elif state == 'teacher_assignment_options':
+        show_main_menu(chat_id)
+    else:
+        show_main_menu(chat_id)
 
 # Обработка расписания
 @bot.message_handler(func=lambda message: message.text == '📅 Расписание')
@@ -286,6 +326,7 @@ def handle_schedule(message):
     conn.close()
 
     role, group_name = user_data
+    user_states[message.chat.id] = {'state': 'schedule_view'}
 
     if role == 'student':
         markup = types.ReplyKeyboardMarkup(resize_keyboard=True, row_width=2)
@@ -293,31 +334,29 @@ def handle_schedule(message):
             types.KeyboardButton('Сегодня'),
             types.KeyboardButton('Завтра'),
             types.KeyboardButton('Неделя'),
-            types.KeyboardButton('Назад')
+            types.KeyboardButton('⬅️ Назад')
         )
         bot.send_message(
             message.chat.id,
             f"Расписание для группы {group_name}:",
             reply_markup=markup
         )
-    else:  # teacher
-        # Для преподавателя можно добавить выбор группы
+    else:
         show_teacher_schedule_options(message.chat.id)
 
-
 def show_teacher_schedule_options(chat_id):
+    user_states[chat_id] = {'state': 'teacher_schedule_options'}
     markup = types.ReplyKeyboardMarkup(resize_keyboard=True, row_width=2)
     markup.add(
         types.KeyboardButton('Мое расписание'),
         types.KeyboardButton('Расписание группы'),
-        types.KeyboardButton('Назад')
+        types.KeyboardButton('⬅️ Назад')
     )
     bot.send_message(
         chat_id,
         "Выберите вариант просмотра расписания:",
         reply_markup=markup
     )
-
 
 # Обработка заданий
 @bot.message_handler(func=lambda message: message.text == '📝 Задания')
@@ -329,6 +368,7 @@ def handle_assignments(message):
     conn.close()
 
     role, group_name = user_data
+    user_states[message.chat.id] = {'state': 'assignments_view'}
 
     if role == 'student':
         assignments = get_assignments(group_name)
@@ -336,29 +376,33 @@ def handle_assignments(message):
             response = "📚 Ваши задания:\n\n"
             for task in assignments:
                 response += (f"📌 {task[2]} ({task[1]})\n"
-                             f"📝 {task[3]}\n"
-                             f"⏰ До {task[4]}\n"
-                             f"👨‍🏫 Преподаватель: {task[5]}\n\n")
-            bot.send_message(message.chat.id, response)
+                           f"📝 {task[3]}\n"
+                           f"⏰ До {task[4]}\n"
+                           f"👨‍🏫 Преподаватель: {task[5]}\n\n")
+            
+            markup = types.ReplyKeyboardMarkup(resize_keyboard=True)
+            markup.add(types.KeyboardButton('⬅️ Назад'))
+            bot.send_message(message.chat.id, response, reply_markup=markup)
         else:
-            bot.send_message(message.chat.id, "У вас пока нет заданий.")
-    else:  # teacher
+            markup = types.ReplyKeyboardMarkup(resize_keyboard=True)
+            markup.add(types.KeyboardButton('⬅️ Назад'))
+            bot.send_message(message.chat.id, "У вас пока нет заданий.", reply_markup=markup)
+    else:
         show_teacher_assignment_options(message.chat.id)
 
-
 def show_teacher_assignment_options(chat_id):
+    user_states[chat_id] = {'state': 'teacher_assignment_options'}
     markup = types.ReplyKeyboardMarkup(resize_keyboard=True, row_width=2)
     markup.add(
         types.KeyboardButton('Мои задания'),
         types.KeyboardButton('Добавить задание'),
-        types.KeyboardButton('Назад')
+        types.KeyboardButton('⬅️ Назад')
     )
     bot.send_message(
         chat_id,
         "Выберите действие с заданиями:",
         reply_markup=markup
     )
-
 
 # Запуск бота
 if __name__ == '__main__':
