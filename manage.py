@@ -1,414 +1,482 @@
 import telebot
 from telebot import types
 import sqlite3
-import os
+import logging
 from datetime import datetime
-import hashlib
 
-# Конфигурация
-BOT_TOKEN = '7977985505:AAFBX8fS6X8nE2Vg7bJ1elajMWotQSmr1vU'
-DATABASE_NAME = 'university_bot.db'
+# Настройка логирования
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    filename='bot.log'
+)
+logger = logging.getLogger(__name__)
 
-bot = telebot.TeleBot(BOT_TOKEN)
+# Инициализация бота
+bot = telebot.TeleBot('7977985505:AAFBX8fS6X8nE2Vg7bJ1elajMWotQSmr1vU')
 
-# Хранилище состояний пользователей
+# Состояния пользователей
 user_states = {}
 
-# Инициализация БД
+# Подключение к базе данных
+def get_db_connection():
+    conn = None
+    try:
+        conn = sqlite3.connect('university.db', check_same_thread=False)
+        conn.row_factory = sqlite3.Row
+        return conn
+    except sqlite3.Error as e:
+        logger.error(f"Ошибка подключения к БД: {e}")
+        if conn:
+            conn.close()
+        raise
+
+# Инициализация базы данных
 def init_db():
-    conn = sqlite3.connect(DATABASE_NAME)
-    cursor = conn.cursor()
-
-    # Таблица пользователей
-    cursor.execute('''
-    CREATE TABLE IF NOT EXISTS users (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        telegram_id INTEGER UNIQUE,
-        full_name TEXT,
-        role TEXT CHECK(role IN ('student', 'teacher', 'abituirent')),
-        group_name TEXT,
-        register_date TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-    )
-    ''')
-
-    # Таблица расписания
-    cursor.execute('''
-    CREATE TABLE IF NOT EXISTS schedule (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        group_name TEXT,
-        day TEXT,
-        time TEXT,
-        subject TEXT,
-        teacher TEXT,
-        classroom TEXT
-    )
-    ''')
-
-    # Таблица заданий
-    cursor.execute('''
-    CREATE TABLE IF NOT EXISTS assignments (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        group_name TEXT,
-        subject TEXT,
-        task_text TEXT,
-        deadline TEXT,
-        teacher TEXT,
-        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-    )
-    ''')
-
-    conn.commit()
-    conn.close()
-
-# Проверка регистрации пользователя
-def is_user_registered(telegram_id):
-    conn = sqlite3.connect(DATABASE_NAME)
-    cursor = conn.cursor()
-    cursor.execute('SELECT * FROM users WHERE telegram_id = ?', (telegram_id,))
-    user = cursor.fetchone()
-    conn.close()
-    return user is not None
-
-# Регистрация пользователя
-def register_user(telegram_id, full_name, role, group_name=None):
-    conn = sqlite3.connect(DATABASE_NAME)
-    cursor = conn.cursor()
-    cursor.execute('''
-    INSERT INTO users (telegram_id, full_name, role, group_name)
-    VALUES (?, ?, ?, ?)
-    ''', (telegram_id, full_name, role, group_name))
-    conn.commit()
-    conn.close()
-
-# Получение расписания
-def get_schedule(group_name, day=None):
-    conn = sqlite3.connect(DATABASE_NAME)
-    cursor = conn.cursor()
-
-    if day:
+    conn = None
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        
         cursor.execute('''
-        SELECT * FROM schedule 
-        WHERE group_name = ? AND day = ?
-        ORDER BY time
-        ''', (group_name, day))
-    else:
-        cursor.execute('''
-        SELECT * FROM schedule 
-        WHERE group_name = ?
-        ORDER BY day, time
-        ''', (group_name,))
-
-    schedule = cursor.fetchall()
-    conn.close()
-    return schedule
-
-# Получение заданий
-def get_assignments(group_name, subject=None):
-    conn = sqlite3.connect(DATABASE_NAME)
-    cursor = conn.cursor()
-
-    if subject:
-        cursor.execute('''
-        SELECT * FROM assignments
-        WHERE group_name = ? AND subject = ?
-        ORDER BY deadline
-        ''', (group_name, subject))
-    else:
-        cursor.execute('''
-        SELECT * FROM assignments 
-        WHERE group_name = ?
-        ORDER BY deadline
-        ''', (group_name,))
-
-    assignments = cursor.fetchall()
-    conn.close()
-    return assignments
-
-# Основные команды
-@bot.message_handler(commands=['start'])
-def start(message):
-    if is_user_registered(message.chat.id):
-        show_main_menu(message.chat.id)
-    else:
-        bot.send_message(
-            message.chat.id,
-            "👋 Добро пожаловать в университетский бот!\n\n"
-            "Для начала работы вам нужно зарегистрироваться.\n"
-            "Выберите вашу роль:",
-            reply_markup=create_role_keyboard()
+        CREATE TABLE IF NOT EXISTS users (
+            chat_id INTEGER PRIMARY KEY,
+            full_name TEXT,
+            role TEXT NOT NULL,
+            group_name TEXT,
+            is_verified BOOLEAN DEFAULT FALSE,
+            registration_date TEXT
         )
-    user_states[message.chat.id] = {'state': 'start'}
+        ''')
+        
+        cursor.execute('''
+        CREATE TABLE IF NOT EXISTS access_keys (
+            key TEXT PRIMARY KEY,
+            role TEXT NOT NULL,
+            is_used BOOLEAN DEFAULT FALSE
+        )
+        ''')
+        
+        # Добавляем тестовые данные
+        cursor.execute("SELECT 1 FROM access_keys WHERE key = 'student123'")
+        if not cursor.fetchone():
+            cursor.execute("INSERT INTO access_keys (key, role) VALUES (?, ?)", 
+                         ('student123', 'student'))
+        
+        cursor.execute("SELECT 1 FROM access_keys WHERE key = 'teacher456'")
+        if not cursor.fetchone():
+            cursor.execute("INSERT INTO access_keys (key, role) VALUES (?, ?)", 
+                         ('teacher456', 'teacher'))
+        
+        conn.commit()
+    except sqlite3.Error as e:
+        logger.error(f"Ошибка инициализации БД: {e}")
+        raise
+    finally:
+        if conn:
+            conn.close()
 
+# Получение информации о пользователе
+def get_user_info(chat_id):
+    conn = None
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        cursor.execute('''
+        SELECT role, group_name, full_name, is_verified 
+        FROM users 
+        WHERE chat_id = ?
+        ''', (chat_id,))
+        return cursor.fetchone()
+    except sqlite3.Error as e:
+        logger.error(f"Ошибка получения данных пользователя: {e}")
+        return None
+    finally:
+        if conn:
+            conn.close()
+
+# Проверка и использование ключа доступа
+def check_and_use_key(key, role):
+    conn = None
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        
+        cursor.execute('''
+        SELECT 1 FROM access_keys 
+        WHERE key = ? AND role = ? AND is_used = FALSE
+        ''', (key, role))
+        
+        if cursor.fetchone():
+            cursor.execute('''
+            UPDATE access_keys 
+            SET is_used = TRUE 
+            WHERE key = ?
+            ''', (key,))
+            conn.commit()
+            return True
+        return False
+    except sqlite3.Error as e:
+        logger.error(f"Ошибка проверки ключа: {e}")
+        return False
+    finally:
+        if conn:
+            conn.close()
+
+# Сохранение пользователя
+def save_user(chat_id, role, full_name=None, group_name=None, is_verified=True):
+    conn = None
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        
+        cursor.execute('''
+        INSERT OR REPLACE INTO users 
+        (chat_id, role, full_name, group_name, is_verified, registration_date)
+        VALUES (?, ?, ?, ?, ?, ?)
+        ''', (
+            chat_id, 
+            role, 
+            full_name, 
+            group_name, 
+            is_verified,
+            datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        ))
+        
+        conn.commit()
+    except sqlite3.Error as e:
+        logger.error(f"Ошибка сохранения пользователя: {e}")
+        raise
+    finally:
+        if conn:
+            conn.close()
+
+# Клавиатуры
 def create_role_keyboard():
     markup = types.ReplyKeyboardMarkup(resize_keyboard=True, row_width=2)
     markup.add(
-        types.KeyboardButton('👨‍🎓 Я студент'),
-        types.KeyboardButton('👨‍🏫 Я преподаватель'),
-        types.KeyboardButton('👨‍💼 Я абитуриент')
+        types.KeyboardButton('👨🎓 Абитуриент'),
+        types.KeyboardButton('👨🎓 Студент'),
+        types.KeyboardButton('👨🏫 Преподаватель')
     )
     return markup
-
-@bot.message_handler(
-    func=lambda message: message.text in ['👨‍🎓 Я студент', '👨‍🏫 Я преподаватель', '👨‍💼 Я абитуриент'])
-def process_role(message):
-    role_map = {
-        '👨‍🎓 Я студент': 'student',
-        '👨‍🏫 Я преподаватель': 'teacher',
-        '👨‍💼 Я абитуриент': 'abituirent'
-    }
-
-    role = role_map[message.text]
-    user_states[message.chat.id] = {'state': 'role_selected', 'role': role}
-
-    if role == 'student':
-        msg = bot.send_message(
-            message.chat.id,
-            "Введите ваше ФИО:",
-            reply_markup=types.ReplyKeyboardRemove()
-        )
-        bot.register_next_step_handler(msg, lambda m: process_student_name(m, role))
-    else:
-        msg = bot.send_message(
-            message.chat.id,
-            "Введите ваш секретный ключ доступа:",
-            reply_markup=types.ReplyKeyboardRemove()
-        )
-        bot.register_next_step_handler(msg, lambda m: process_teacher_auth(m, role))
-
-def process_student_name(message, role):
-    full_name = message.text
-    user_states[message.chat.id]['full_name'] = full_name
-    msg = bot.send_message(
-        message.chat.id,
-        "Введите название вашей группы:",
-        reply_markup=create_back_keyboard()
-    )
-    bot.register_next_step_handler(msg, lambda m: process_student_group(m, role, full_name))
-
-def process_student_group(message, role, full_name):
-    if message.text == '⬅️ Назад':
-        msg = bot.send_message(
-            message.chat.id,
-            "Введите ваше ФИО:",
-            reply_markup=types.ReplyKeyboardRemove()
-        )
-        bot.register_next_step_handler(msg, lambda m: process_student_name(m, role))
-        return
-    
-    group_name = message.text
-    register_user(message.chat.id, full_name, role, group_name)
-    bot.send_message(
-        message.chat.id,
-        f"✅ Регистрация завершена!\n\n"
-        f"ФИО: {full_name}\n"
-        f"Роль: {role}\n"
-        f"Группа: {group_name}",
-        reply_markup=types.ReplyKeyboardRemove()
-    )
-    show_main_menu(message.chat.id)
-
-def process_teacher_auth(message, role):
-    if message.text == '⬅️ Назад':
-        start(message)
-        return
-    
-    valid_keys = {
-        'teacher': 'teacher123',
-    }
-
-    if message.text.strip() == valid_keys[role]:
-        msg = bot.send_message(
-            message.chat.id,
-            "Введите ваше ФИО:",
-            reply_markup=create_back_keyboard()
-        )
-        bot.register_next_step_handler(msg, lambda m: process_teacher_name(m, role))
-    else:
-        bot.send_message(
-            message.chat.id,
-            "❌ Неверный ключ доступа. Попробуйте снова.",
-            reply_markup=create_role_keyboard()
-        )
-
-def process_teacher_name(message, role):
-    if message.text == '⬅️ Назад':
-        msg = bot.send_message(
-            message.chat.id,
-            "Введите ваш секретный ключ доступа:",
-            reply_markup=types.ReplyKeyboardRemove()
-        )
-        bot.register_next_step_handler(msg, lambda m: process_teacher_auth(m, role))
-        return
-    
-    full_name = message.text
-    register_user(message.chat.id, full_name, role)
-    bot.send_message(
-        message.chat.id,
-        f"✅ Регистрация завершена!\n\n"
-        f"ФИО: {full_name}\n"
-        f"Роль: {role}",
-        reply_markup=types.ReplyKeyboardRemove()
-    )
-    show_main_menu(message.chat.id)
 
 def create_back_keyboard():
     markup = types.ReplyKeyboardMarkup(resize_keyboard=True)
     markup.add(types.KeyboardButton('⬅️ Назад'))
     return markup
 
-# Главное меню
-def show_main_menu(chat_id):
+def create_main_menu(role, full_name=""):
     markup = types.ReplyKeyboardMarkup(resize_keyboard=True, row_width=2)
-
-    conn = sqlite3.connect(DATABASE_NAME)
-    cursor = conn.cursor()
-    cursor.execute('SELECT role FROM users WHERE telegram_id = ?', (chat_id,))
-    role = cursor.fetchone()[0]
-    conn.close()
-
-    if role == 'student':
-        markup.add(
-            types.KeyboardButton('📅 Расписание'),
-            types.KeyboardButton('📝 Задания'),
-            types.KeyboardButton('📊 Успеваемость'),
-            types.KeyboardButton('ℹ️ Помощь')
-        )
+    
+    if role == 'abituirent':
+        buttons = [
+            '📚 Информация о факультетах',
+            '📝 Правила приема',
+            '📅 Дни открытых дверей',
+            '📞 Контакты приемной комиссии'
+        ]
+    elif role == 'student':
+        buttons = [
+            '📅 Расписание',
+            '📝 Задания',
+            '📊 Успеваемость',
+            'ℹ️ Помощь'
+        ]
     elif role == 'teacher':
-        markup.add(
-            types.KeyboardButton('📅 Расписание'),
-            types.KeyboardButton('📝 Задания'),
-            types.KeyboardButton('👥 Группы'),
-            types.KeyboardButton('ℹ️ Помощь')
-        )
-    else:  # abituirent
-        markup.add(
-            types.KeyboardButton('📅 Управление расписанием'),
-            types.KeyboardButton('📝 Управление заданиями'),
-            types.KeyboardButton('👥 Управление пользователями'),
-            types.KeyboardButton('⚙️ Настройки системы')
-        )
-
-    user_states[chat_id] = {'state': 'main_menu'}
-    bot.send_message(
-        chat_id,
-        "Главное меню:",
-        reply_markup=markup
-    )
-
-# Обработка кнопки Назад
-@bot.message_handler(func=lambda message: message.text == '⬅️ Назад')
-def handle_back(message):
-    chat_id = message.chat.id
-    if chat_id not in user_states:
-        start(message)
-        return
+        buttons = [
+            '📅 Расписание',
+            '📝 Задания',
+            '👥 Группы',
+            '📊 Успеваемость',
+            'ℹ️ Помощь'
+        ]
     
-    state = user_states[chat_id].get('state')
-    
-    if state == 'schedule_view':
-        handle_schedule(message)
-    elif state == 'assignments_view':
-        handle_assignments(message)
-    elif state == 'teacher_schedule_options':
-        show_main_menu(chat_id)
-    elif state == 'teacher_assignment_options':
-        show_main_menu(chat_id)
-    else:
-        show_main_menu(chat_id)
+    markup.add(*[types.KeyboardButton(btn) for btn in buttons])
+    markup.add(types.KeyboardButton('⬅️ Назад'))
+    return markup
 
-# Обработка расписания
-@bot.message_handler(func=lambda message: message.text == '📅 Расписание')
-def handle_schedule(message):
-    conn = sqlite3.connect(DATABASE_NAME)
-    cursor = conn.cursor()
-    cursor.execute('SELECT role, group_name FROM users WHERE telegram_id = ?', (message.chat.id,))
-    user_data = cursor.fetchone()
-    conn.close()
-
-    role, group_name = user_data
-    user_states[message.chat.id] = {'state': 'schedule_view'}
-
-    if role == 'student':
-        markup = types.ReplyKeyboardMarkup(resize_keyboard=True, row_width=2)
-        markup.add(
-            types.KeyboardButton('Сегодня'),
-            types.KeyboardButton('Завтра'),
-            types.KeyboardButton('Неделя'),
-            types.KeyboardButton('⬅️ Назад')
+# Обработчики сообщений
+@bot.message_handler(commands=['start'])
+def start_handler(message):
+    try:
+        chat_id = message.chat.id
+        bot.send_message(
+            chat_id,
+            "Здравствуйте, выберите свой профиль!",
+            reply_markup=create_role_keyboard()
         )
+        user_states[chat_id] = {'state': 'selecting_role'}
+    except Exception as e:
+        logger.error(f"Ошибка в обработчике /start: {e}")
+        bot.send_message(message.chat.id, "Произошла ошибка. Пожалуйста, попробуйте позже.")
+
+@bot.message_handler(func=lambda m: m.text in ['👨🎓 Абитуриент', '👨🎓 Студент', '👨🏫 Преподаватель'])
+def role_selection_handler(message):
+    try:
+        chat_id = message.chat.id
+        role_map = {
+            '👨🎓 Абитуриент': 'abituirent',
+            '👨🎓 Студент': 'student',
+            '👨🏫 Преподаватель': 'teacher'
+        }
+        
+        role = role_map[message.text]
+        user_states[chat_id] = {'role': role}
+        
+        if role == 'abituirent':
+            save_user(chat_id, role)
+            show_abituirent_menu(chat_id)
+        else:
+            msg = bot.send_message(
+                chat_id,
+                "Для дальнейшего использования введите ключ доступа:",
+                reply_markup=create_back_keyboard()
+            )
+            bot.register_next_step_handler(msg, process_access_key)
+    except Exception as e:
+        logger.error(f"Ошибка выбора роли: {e}")
+        bot.send_message(message.chat.id, "Произошла ошибка. Пожалуйста, попробуйте снова.")
+
+def process_access_key(message):
+    try:
+        chat_id = message.chat.id
+        
+        if message.text == '⬅️ Назад':
+            return start_handler(message)
+        
+        role = user_states.get(chat_id, {}).get('role')
+        if not role:
+            return start_handler(message)
+        
+        if check_and_use_key(message.text, role):
+            save_user(chat_id, role, is_verified=True)
+            
+            if role == 'student':
+                msg = bot.send_message(
+                    chat_id,
+                    "Ключ принят! Теперь введите ваше ФИО:",
+                    reply_markup=create_back_keyboard()
+                )
+                bot.register_next_step_handler(msg, process_student_full_name)
+            else:
+                msg = bot.send_message(
+                    chat_id,
+                    "Ключ принят! Теперь введите ваше ФИО:",
+                    reply_markup=create_back_keyboard()
+                )
+                bot.register_next_step_handler(msg, process_teacher_full_name)
+        else:
+            msg = bot.send_message(
+                chat_id,
+                "❌ Неверный ключ доступа. Пожалуйста, введите правильный ключ:",
+                reply_markup=create_back_keyboard()
+            )
+            bot.register_next_step_handler(msg, process_access_key)
+    except Exception as e:
+        logger.error(f"Ошибка обработки ключа: {e}")
+        bot.send_message(message.chat.id, "Произошла ошибка. Пожалуйста, попробуйте снова.")
+
+def process_student_full_name(message):
+    try:
+        chat_id = message.chat.id
+        
+        if message.text == '⬅️ Назад':
+            return start_handler(message)
+        
+        user_states[chat_id]['full_name'] = message.text
+        
+        msg = bot.send_message(
+            chat_id,
+            "Теперь введите название вашей группы:",
+            reply_markup=create_back_keyboard()
+        )
+        bot.register_next_step_handler(msg, process_student_group)
+    except Exception as e:
+        logger.error(f"Ошибка ввода ФИО студента: {e}")
+        bot.send_message(message.chat.id, "Произошла ошибка. Пожалуйста, попробуйте снова.")
+
+def process_student_group(message):
+    try:
+        chat_id = message.chat.id
+        
+        if message.text == '⬅️ Назад':
+            return start_handler(message)
+        
+        save_user(
+            chat_id,
+            'student',
+            full_name=user_states[chat_id]['full_name'],
+            group_name=message.text,
+            is_verified=True
+        )
+        
+        bot.send_message(
+            chat_id,
+            "✅ Регистрация завершена!",
+            reply_markup=types.ReplyKeyboardRemove()
+        )
+        show_main_menu(chat_id)
+    except Exception as e:
+        logger.error(f"Ошибка ввода группы студента: {e}")
+        bot.send_message(message.chat.id, "Произошла ошибка. Пожалуйста, попробуйте снова.")
+
+def process_teacher_full_name(message):
+    try:
+        chat_id = message.chat.id
+        
+        if message.text == '⬅️ Назад':
+            return start_handler(message)
+        
+        save_user(
+            chat_id,
+            'teacher',
+            full_name=message.text,
+            is_verified=True
+        )
+        
+        bot.send_message(
+            chat_id,
+            "✅ Регистрация завершена!",
+            reply_markup=types.ReplyKeyboardRemove()
+        )
+        show_main_menu(chat_id)
+    except Exception as e:
+        logger.error(f"Ошибка ввода ФИО преподавателя: {e}")
+        bot.send_message(message.chat.id, "Произошла ошибка. Пожалуйста, попробуйте снова.")
+
+@bot.message_handler(func=lambda m: m.text == '⬅️ Назад')
+def back_handler(message):
+    try:
+        chat_id = message.chat.id
+        user_info = get_user_info(chat_id)
+        
+        if not user_info:
+            return start_handler(message)
+        
+        show_main_menu(chat_id)
+    except Exception as e:
+        logger.error(f"Ошибка обработки кнопки Назад: {e}")
+        bot.send_message(message.chat.id, "Произошла ошибка. Пожалуйста, попробуйте снова.")
+
+# Меню и информационные разделы
+def show_main_menu(chat_id):
+    try:
+        user_info = get_user_info(chat_id)
+        if not user_info:
+            return start_handler(chat_id)
+        
+        role = user_info['role']
+        full_name = user_info['full_name'] or ""
+        
+        if role == 'abituirent':
+            text = "Мы рады новым учащимся. Выберите какую информацию хотите получить:"
+        elif role == 'student':
+            text = f"Главное меню студента {full_name}"
+        else:
+            text = f"Главное меню преподавателя {full_name}"
+        
+        bot.send_message(
+            chat_id,
+            text,
+            reply_markup=create_main_menu(role, full_name)
+        )
+        user_states[chat_id] = {'state': 'main_menu'}
+    except Exception as e:
+        logger.error(f"Ошибка показа главного меню: {e}")
+        bot.send_message(chat_id, "Произошла ошибка. Пожалуйста, попробуйте позже.")
+
+def show_abituirent_menu(chat_id):
+    try:
+        bot.send_message(
+            chat_id,
+            "Мы рады новым учащимся. Выберите какую информацию хотите получить:",
+            reply_markup=create_main_menu('abituirent')
+        )
+        user_states[chat_id] = {'state': 'abituirent_menu'}
+    except Exception as e:
+        logger.error(f"Ошибка показа меню абитуриента: {e}")
+        bot.send_message(chat_id, "Произошла ошибка. Пожалуйста, попробуйте позже.")
+
+ABITURIENT_INFO = {
+    '📚 Информация о факультетах': """
+📚 <b>Информация о факультетах</b>:
+
+1. <b>Факультет информационных технологий</b>
+   - Компьютерные науки
+   - Программная инженерия
+   - Кибербезопасность
+
+2. <b>Экономический факультет</b>
+   - Финансы и кредит
+   - Бухгалтерский учет
+   - Менеджмент
+
+3. <b>Гуманитарный факультет</b>
+   - Психология
+   - Филология
+   - История
+    """,
+    '📝 Правила приема': """
+📝 <b>Правила приема</b>:
+
+1. Подача документов: с 1 июня по 15 июля
+2. Вступительные испытания: с 20 июля по 5 августа
+3. Необходимые документы:
+   - Паспорт
+   - Аттестат
+   - 4 фотографии 3x4
+   - Медицинская справка
+    """,
+    '📅 Дни открытых дверей': """
+📅 <b>Дни открытых дверей</b>:
+
+- 15 апреля 2024, 12:00
+- 20 мая 2024, 12:00
+- 10 июня 2024, 12:00
+
+Адрес: г. Москва, ул. Университетская, д.1, ауд. 101
+    """,
+    '📞 Контакты приемной комиссии': """
+📞 <b>Контакты приемной комиссии</b>:
+
+Телефон: +7 (495) 123-45-67
+Email: admission@university.ru
+Адрес: г. Москва, ул. Университетская, д.1, каб. 205
+
+Часы работы: Пн-Пт с 9:00 до 18:00
+    """
+}
+
+@bot.message_handler(func=lambda m: get_user_info(m.chat.id) and 
+                   get_user_info(m.chat.id)['role'] == 'abituirent' and
+                   m.text in ABITURIENT_INFO.keys())
+def abituirent_info_handler(message):
+    try:
         bot.send_message(
             message.chat.id,
-            f"Расписание для группы {group_name}:",
-            reply_markup=markup
+            ABITURIENT_INFO[message.text],
+            parse_mode='HTML',
+            reply_markup=create_back_keyboard()
         )
-    else:
-        show_teacher_schedule_options(message.chat.id)
+    except Exception as e:
+        logger.error(f"Ошибка показа информации для абитуриентов: {e}")
+        bot.send_message(message.chat.id, "Произошла ошибка. Пожалуйста, попробуйте позже.")
 
-def show_teacher_schedule_options(chat_id):
-    user_states[chat_id] = {'state': 'teacher_schedule_options'}
-    markup = types.ReplyKeyboardMarkup(resize_keyboard=True, row_width=2)
-    markup.add(
-        types.KeyboardButton('Мое расписание'),
-        types.KeyboardButton('Расписание группы'),
-        types.KeyboardButton('⬅️ Назад')
-    )
+@bot.message_handler(func=lambda m: True)
+def unknown_handler(message):
     bot.send_message(
-        chat_id,
-        "Выберите вариант просмотра расписания:",
-        reply_markup=markup
+        message.chat.id,
+        "Извините, я не понимаю эту команду. Пожалуйста, используйте кнопки меню.",
+        reply_markup=create_back_keyboard()
     )
 
-# Обработка заданий
-@bot.message_handler(func=lambda message: message.text == '📝 Задания')
-def handle_assignments(message):
-    conn = sqlite3.connect(DATABASE_NAME)
-    cursor = conn.cursor()
-    cursor.execute('SELECT role, group_name FROM users WHERE telegram_id = ?', (message.chat.id,))
-    user_data = cursor.fetchone()
-    conn.close()
-
-    role, group_name = user_data
-    user_states[message.chat.id] = {'state': 'assignments_view'}
-
-    if role == 'student':
-        assignments = get_assignments(group_name)
-        if assignments:
-            response = "📚 Ваши задания:\n\n"
-            for task in assignments:
-                response += (f"📌 {task[2]} ({task[1]})\n"
-                           f"📝 {task[3]}\n"
-                           f"⏰ До {task[4]}\n"
-                           f"👨‍🏫 Преподаватель: {task[5]}\n\n")
-            
-            markup = types.ReplyKeyboardMarkup(resize_keyboard=True)
-            markup.add(types.KeyboardButton('⬅️ Назад'))
-            bot.send_message(message.chat.id, response, reply_markup=markup)
-        else:
-            markup = types.ReplyKeyboardMarkup(resize_keyboard=True)
-            markup.add(types.KeyboardButton('⬅️ Назад'))
-            bot.send_message(message.chat.id, "У вас пока нет заданий.", reply_markup=markup)
-    else:
-        show_teacher_assignment_options(message.chat.id)
-
-def show_teacher_assignment_options(chat_id):
-    user_states[chat_id] = {'state': 'teacher_assignment_options'}
-    markup = types.ReplyKeyboardMarkup(resize_keyboard=True, row_width=2)
-    markup.add(
-        types.KeyboardButton('Мои задания'),
-        types.KeyboardButton('Добавить задание'),
-        types.KeyboardButton('⬅️ Назад')
-    )
-    bot.send_message(
-        chat_id,
-        "Выберите действие с заданиями:",
-        reply_markup=markup
-    )
-
-# Запуск бота
+# Инициализация и запуск
 if __name__ == '__main__':
-    if not os.path.exists(DATABASE_NAME):
+    try:
         init_db()
-        print("База данных инициализирована")
-
-    print("Бот запущен...")
-    bot.polling(none_stop=True)
+        logger.info("База данных инициализирована")
+        logger.info("Запуск бота...")
+        bot.infinity_polling()
+    except Exception as e:
+        logger.critical(f"Критическая ошибка: {e}")
