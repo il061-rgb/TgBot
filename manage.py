@@ -13,11 +13,10 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # Инициализация бота
-bot = telebot.TeleBot('7977985505:AAFBX8fS6X8nE2Vg7bJ1elajMWotQSmr1vU')  
+bot = telebot.TeleBot('7303895887:AAGWZ83wBKfnAeIT3GrRH1A49E62kAcZTJU')
 
 # Состояния пользователей
 user_states = {}
-
 
 # Подключение к базе данных
 def get_db_connection():
@@ -29,7 +28,6 @@ def get_db_connection():
         logger.error(f"Database connection error: {e}")
         raise
 
-
 # Инициализация базы данных
 def init_db():
     try:
@@ -39,58 +37,158 @@ def init_db():
             # Таблица пользователей
             cursor.execute('''
             CREATE TABLE IF NOT EXISTS users (
-                chat_id INTEGER PRIMARY KEY,
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                chat_id INTEGER UNIQUE NOT NULL,
                 full_name TEXT,
                 role TEXT NOT NULL,
-                group_name TEXT,
+                group_id INTEGER,
+                email TEXT,
+                phone TEXT,
                 is_verified BOOLEAN DEFAULT FALSE,
-                registration_date TEXT
+                registration_date TEXT NOT NULL,
+                last_activity TEXT NOT NULL,
+                FOREIGN KEY (group_id) REFERENCES groups(id)
+            )
+            ''')
+
+            # Таблица групп
+            cursor.execute('''
+            CREATE TABLE IF NOT EXISTS groups (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                name TEXT UNIQUE NOT NULL,
+                faculty TEXT NOT NULL,
+                course INTEGER NOT NULL,
+                curator_id INTEGER,
+                FOREIGN KEY (curator_id) REFERENCES users(id)
             )
             ''')
 
             # Таблица ключей доступа
             cursor.execute('''
             CREATE TABLE IF NOT EXISTS access_keys (
-                key TEXT PRIMARY KEY,
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                key TEXT UNIQUE NOT NULL,
                 role TEXT NOT NULL,
-                is_used BOOLEAN DEFAULT FALSE
+                is_used BOOLEAN DEFAULT FALSE,
+                created_at TEXT NOT NULL,
+                used_at TEXT
             )
             ''')
 
-            # Тестовые ключи
+            # Таблица расписания
+            cursor.execute('''
+            CREATE TABLE IF NOT EXISTS schedule (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                group_id INTEGER NOT NULL,
+                day_of_week TEXT NOT NULL,
+                time TEXT NOT NULL,
+                subject TEXT NOT NULL,
+                teacher_id INTEGER NOT NULL,
+                classroom TEXT NOT NULL,
+                FOREIGN KEY (group_id) REFERENCES groups(id),
+                FOREIGN KEY (teacher_id) REFERENCES users(id)
+            )
+            ''')
+
+            # Таблица заданий
+            cursor.execute('''
+            CREATE TABLE IF NOT EXISTS assignments (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                title TEXT NOT NULL,
+                description TEXT,
+                group_id INTEGER NOT NULL,
+                teacher_id INTEGER NOT NULL,
+                subject TEXT NOT NULL,
+                deadline TEXT,
+                created_at TEXT NOT NULL,
+                FOREIGN KEY (group_id) REFERENCES groups(id),
+                FOREIGN KEY (teacher_id) REFERENCES users(id)
+            )
+            ''')
+
+            # Таблица успеваемости
+            cursor.execute('''
+            CREATE TABLE IF NOT EXISTS academic_performance (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                student_id INTEGER NOT NULL,
+                assignment_id INTEGER NOT NULL,
+                grade INTEGER,
+                submitted_at TEXT,
+                teacher_comment TEXT,
+                FOREIGN KEY (student_id) REFERENCES users(id),
+                FOREIGN KEY (assignment_id) REFERENCES assignments(id)
+            )
+            ''')
+
+            # Создаем тестовые группы
+            test_groups = [
+                ('ИВТ-2023', 'Информационные технологии', 1),
+                ('ПИ-2022', 'Информационные технологии', 2),
+                ('ЭК-2023', 'Экономика', 1)
+            ]
+            
+            for name, faculty, course in test_groups:
+                cursor.execute("INSERT OR IGNORE INTO groups (name, faculty, course) VALUES (?, ?, ?)", 
+                             (name, faculty, course))
+
+            # Тестовые ключи доступа
             test_keys = [
                 ('student123', 'student'),
                 ('teacher456', 'teacher'),
-                ('admin789', 'admin')
+                ('admin789', 'admin'),
+                ('abiturient000', 'abiturient')
             ]
-
+            
             for key, role in test_keys:
-                cursor.execute("INSERT OR IGNORE INTO access_keys (key, role) VALUES (?, ?)", (key, role))
+                cursor.execute("INSERT OR IGNORE INTO access_keys (key, role, created_at) VALUES (?, ?, ?)", 
+                             (key, role, datetime.now().strftime("%Y-%m-%d %H:%M:%S")))
+
+            # Тестовое расписание
+            cursor.execute("SELECT id FROM groups WHERE name = 'ИВТ-2023'")
+            group_id = cursor.fetchone()['id']
+            cursor.execute("SELECT id FROM users WHERE role = 'teacher' LIMIT 1")
+            teacher_id = cursor.fetchone()['id'] if cursor.fetchone() else 1
+            
+            test_schedule = [
+                (group_id, 'Понедельник', '09:00', 'Программирование', teacher_id, '304'),
+                (group_id, 'Понедельник', '11:00', 'Математика', teacher_id, '412'),
+                (group_id, 'Вторник', '10:00', 'Базы данных', teacher_id, '215')
+            ]
+            
+            for item in test_schedule:
+                cursor.execute('''
+                INSERT OR IGNORE INTO schedule 
+                (group_id, day_of_week, time, subject, teacher_id, classroom)
+                VALUES (?, ?, ?, ?, ?, ?)
+                ''', item)
 
             conn.commit()
     except sqlite3.Error as e:
         logger.error(f"Database initialization error: {e}")
         raise
 
-
 # Функции работы с базой данных
 def get_user_info(chat_id):
     try:
         with get_db_connection() as conn:
             cursor = conn.cursor()
-            cursor.execute('SELECT * FROM users WHERE chat_id = ?', (chat_id,))
+            cursor.execute('''
+            SELECT u.*, g.name as group_name 
+            FROM users u
+            LEFT JOIN groups g ON u.group_id = g.id
+            WHERE u.chat_id = ?
+            ''', (chat_id,))
             return cursor.fetchone()
     except sqlite3.Error as e:
         logger.error(f"Error getting user info: {e}")
         return None
-
 
 def check_access_key(key, role):
     try:
         with get_db_connection() as conn:
             cursor = conn.cursor()
             cursor.execute('''
-            SELECT 1 FROM access_keys 
+            SELECT id FROM access_keys 
             WHERE key = ? AND role = ? AND is_used = FALSE
             ''', (key, role))
             return bool(cursor.fetchone())
@@ -98,28 +196,39 @@ def check_access_key(key, role):
         logger.error(f"Error checking access key: {e}")
         return False
 
-
 def mark_key_as_used(key):
     try:
         with get_db_connection() as conn:
             cursor = conn.cursor()
-            cursor.execute('UPDATE access_keys SET is_used = TRUE WHERE key = ?', (key,))
+            cursor.execute('''
+            UPDATE access_keys 
+            SET is_used = TRUE, used_at = ?
+            WHERE key = ?
+            ''', (datetime.now().strftime("%Y-%m-%d %H:%M:%S"), key))
             conn.commit()
     except sqlite3.Error as e:
         logger.error(f"Error marking key as used: {e}")
         raise
 
-
 def save_user(chat_id, role, full_name=None, group_name=None, is_verified=True):
     try:
         with get_db_connection() as conn:
             cursor = conn.cursor()
+            
+            group_id = None
+            if group_name:
+                cursor.execute("SELECT id FROM groups WHERE name = ?", (group_name,))
+                group = cursor.fetchone()
+                if group:
+                    group_id = group['id']
+            
             cursor.execute('''
             INSERT OR REPLACE INTO users 
-            (chat_id, role, full_name, group_name, is_verified, registration_date)
-            VALUES (?, ?, ?, ?, ?, ?)
+            (chat_id, role, full_name, group_id, is_verified, registration_date, last_activity)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
             ''', (
-                chat_id, role, full_name, group_name, is_verified,
+                chat_id, role, full_name, group_id, is_verified,
+                datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
                 datetime.now().strftime("%Y-%m-%d %H:%M:%S")
             ))
             conn.commit()
@@ -127,6 +236,83 @@ def save_user(chat_id, role, full_name=None, group_name=None, is_verified=True):
         logger.error(f"Error saving user: {e}")
         raise
 
+def get_group_schedule(group_name):
+    try:
+        with get_db_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute('''
+            SELECT s.day_of_week, s.time, s.subject, s.classroom, u.full_name as teacher_name
+            FROM schedule s
+            JOIN groups g ON s.group_id = g.id
+            JOIN users u ON s.teacher_id = u.id
+            WHERE g.name = ?
+            ORDER BY 
+                CASE s.day_of_week
+                    WHEN 'Понедельник' THEN 1
+                    WHEN 'Вторник' THEN 2
+                    WHEN 'Среда' THEN 3
+                    WHEN 'Четверг' THEN 4
+                    WHEN 'Пятница' THEN 5
+                    WHEN 'Суббота' THEN 6
+                    ELSE 7
+                END,
+                s.time
+            ''', (group_name,))
+            return cursor.fetchall()
+    except sqlite3.Error as e:
+        logger.error(f"Error getting group schedule: {e}")
+        return None
+
+def get_student_assignments(chat_id):
+    try:
+        with get_db_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute('''
+            SELECT a.title, a.description, a.subject, a.deadline, 
+                   ap.grade, ap.submitted_at, ap.teacher_comment,
+                   u.full_name as teacher_name
+            FROM assignments a
+            JOIN users u ON a.teacher_id = u.id
+            LEFT JOIN academic_performance ap ON a.id = ap.assignment_id AND ap.student_id = (
+                SELECT id FROM users WHERE chat_id = ?
+            )
+            WHERE a.group_id = (
+                SELECT group_id FROM users WHERE chat_id = ?
+            )
+            ORDER BY a.deadline
+            ''', (chat_id, chat_id))
+            return cursor.fetchall()
+    except sqlite3.Error as e:
+        logger.error(f"Error getting student assignments: {e}")
+        return None
+
+def get_teacher_groups(teacher_chat_id):
+    try:
+        with get_db_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute('''
+            SELECT g.name, g.faculty, g.course
+            FROM groups g
+            JOIN users u ON g.curator_id = u.id
+            WHERE u.chat_id = ?
+            ''', (teacher_chat_id,))
+            return cursor.fetchall()
+    except sqlite3.Error as e:
+        logger.error(f"Error getting teacher groups: {e}")
+        return None
+
+def update_user_last_activity(chat_id):
+    try:
+        with get_db_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute('''
+            UPDATE users 
+            SET last_activity = ?
+            WHERE chat_id = ?
+            ''', (datetime.now().strftime("%Y-%m-%d %H:%M:%S"), chat_id))
+            conn.commit()
+    except sqlite3.Error as e:
+        logger.error(f"Error updating user last activity: {e}")
 
 # Клавиатуры
 def create_role_keyboard():
@@ -138,12 +324,10 @@ def create_role_keyboard():
     )
     return markup
 
-
 def create_back_keyboard():
     markup = types.ReplyKeyboardMarkup(resize_keyboard=True)
     markup.add(types.KeyboardButton('⬅️ Назад'))
     return markup
-
 
 def create_main_menu(role):
     markup = types.ReplyKeyboardMarkup(resize_keyboard=True, row_width=2)
@@ -182,7 +366,6 @@ def create_main_menu(role):
     markup.add(*[types.KeyboardButton(btn) for btn in buttons])
     return markup
 
-
 # Обработчики команд
 @bot.message_handler(commands=['start', 'help'])
 def start_handler(message):
@@ -202,7 +385,6 @@ def start_handler(message):
     except Exception as e:
         logger.error(f"Start handler error: {e}")
         bot.send_message(message.chat.id, "⚠️ Произошла ошибка. Пожалуйста, попробуйте позже.")
-
 
 @bot.message_handler(func=lambda m: m.text in ['🎓 Абитуриент', '👨🎓 Студент', '👨🏫 Преподаватель'])
 def role_selection_handler(message):
@@ -230,7 +412,6 @@ def role_selection_handler(message):
     except Exception as e:
         logger.error(f"Role selection error: {e}")
         bot.send_message(message.chat.id, "⚠️ Произошла ошибка. Пожалуйста, попробуйте снова.")
-
 
 def process_access_key(message):
     try:
@@ -271,7 +452,6 @@ def process_access_key(message):
         logger.error(f"Access key processing error: {e}")
         bot.send_message(message.chat.id, "⚠️ Произошла ошибка. Пожалуйста, попробуйте снова.")
 
-
 def process_student_full_name(message):
     try:
         chat_id = message.chat.id
@@ -300,7 +480,6 @@ def process_student_full_name(message):
         logger.error(f"Student full name processing error: {e}")
         bot.send_message(message.chat.id, "⚠️ Произошла ошибка. Пожалуйста, попробуйте снова.")
 
-
 def process_student_group(message):
     try:
         chat_id = message.chat.id
@@ -325,7 +504,6 @@ def process_student_group(message):
     except Exception as e:
         logger.error(f"Student group processing error: {e}")
         bot.send_message(message.chat.id, "⚠️ Произошла ошибка. Пожалуйста, попробуйте снова.")
-
 
 def process_teacher_full_name(message):
     try:
@@ -360,7 +538,6 @@ def process_teacher_full_name(message):
         logger.error(f"Teacher full name processing error: {e}")
         bot.send_message(message.chat.id, "⚠️ Произошла ошибка. Пожалуйста, попробуйте снова.")
 
-
 @bot.message_handler(func=lambda m: m.text == '⬅️ Назад')
 def back_handler(message):
     try:
@@ -374,7 +551,6 @@ def back_handler(message):
     except Exception as e:
         logger.error(f"Back handler error: {e}")
         bot.send_message(message.chat.id, "⚠️ Произошла ошибка. Пожалуйста, попробуйте снова.")
-
 
 # Меню и информационные разделы
 def show_main_menu(chat_id, role):
@@ -394,10 +570,10 @@ def show_main_menu(chat_id, role):
             reply_markup=create_main_menu(role)
         )
         user_states[chat_id] = {'state': 'main_menu'}
+        update_user_last_activity(chat_id)
     except Exception as e:
         logger.error(f"Show main menu error: {e}")
         bot.send_message(chat_id, "⚠️ Произошла ошибка. Пожалуйста, попробуйте позже.")
-
 
 def show_abiturient_menu(chat_id):
     try:
@@ -407,10 +583,10 @@ def show_abiturient_menu(chat_id):
             reply_markup=create_main_menu('abiturient')
         )
         user_states[chat_id] = {'state': 'abiturient_menu'}
+        update_user_last_activity(chat_id)
     except Exception as e:
         logger.error(f"Show abiturient menu error: {e}")
         bot.send_message(chat_id, "⚠️ Произошла ошибка. Пожалуйста, попробуйте позже.")
-
 
 # Информационные разделы
 ABITURIENT_INFO = {
@@ -602,11 +778,10 @@ TEACHER_INFO = {
 """
 }
 
-
 # Обработчики информационных разделов
 @bot.message_handler(func=lambda m: get_user_info(m.chat.id) and
-                                    get_user_info(m.chat.id)['role'] == 'abiturient' and
-                                    m.text in ABITURIENT_INFO.keys())
+                                  get_user_info(m.chat.id)['role'] == 'abiturient' and
+                                  m.text in ABITURIENT_INFO.keys())
 def abiturient_info_handler(message):
     try:
         bot.send_message(
@@ -615,14 +790,14 @@ def abiturient_info_handler(message):
             parse_mode='HTML',
             reply_markup=create_main_menu('abiturient')
         )
+        update_user_last_activity(message.chat.id)
     except Exception as e:
         logger.error(f"Abiturient info handler error: {e}")
         bot.send_message(message.chat.id, "⚠️ Произошла ошибка. Пожалуйста, попробуйте позже.")
 
-
 @bot.message_handler(func=lambda m: get_user_info(m.chat.id) and
-                                    get_user_info(m.chat.id)['role'] == 'student' and
-                                    m.text in STUDENT_INFO.keys())
+                                  get_user_info(m.chat.id)['role'] == 'student' and
+                                  m.text in STUDENT_INFO.keys())
 def student_info_handler(message):
     try:
         user_info = get_user_info(message.chat.id)
@@ -633,7 +808,7 @@ def student_info_handler(message):
                 full_name=user_info['full_name'],
                 group_name=user_info['group_name'],
                 reg_date=user_info['registration_date'],
-                email=f"{user_info['group_name'].lower()}@edu.university.ru"
+                email=f"{user_info['group_name'].lower().replace('-', '')}@edu.university.ru"
             )
 
         bot.send_message(
@@ -642,14 +817,14 @@ def student_info_handler(message):
             parse_mode='HTML',
             reply_markup=create_main_menu('student')
         )
+        update_user_last_activity(message.chat.id)
     except Exception as e:
         logger.error(f"Student info handler error: {e}")
         bot.send_message(message.chat.id, "⚠️ Произошла ошибка. Пожалуйста, попробуйте позже.")
 
-
 @bot.message_handler(func=lambda m: get_user_info(m.chat.id) and
-                                    get_user_info(m.chat.id)['role'] == 'teacher' and
-                                    m.text in TEACHER_INFO.keys())
+                                  get_user_info(m.chat.id)['role'] == 'teacher' and
+                                  m.text in TEACHER_INFO.keys())
 def teacher_info_handler(message):
     try:
         bot.send_message(
@@ -658,10 +833,10 @@ def teacher_info_handler(message):
             parse_mode='HTML',
             reply_markup=create_main_menu('teacher')
         )
+        update_user_last_activity(message.chat.id)
     except Exception as e:
         logger.error(f"Teacher info handler error: {e}")
         bot.send_message(message.chat.id, "⚠️ Произошла ошибка. Пожалуйста, попробуйте позже.")
-
 
 @bot.message_handler(func=lambda m: True)
 def unknown_handler(message):
@@ -670,7 +845,6 @@ def unknown_handler(message):
         "❌ Извините, я не понимаю эту команду. Пожалуйста, используйте кнопки меню.",
         reply_markup=create_back_keyboard()
     )
-
 
 # Запуск бота
 if __name__ == '__main__':
